@@ -99,15 +99,29 @@ model = AutoModelForCausalLM.from_pretrained(
 messages = [{"role": "user", "content": "سلام! خودت را کوتاه معرفی کن."}]
 ids = tok.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt").to("cuda")
 
+# Ouro's EOS is <|endoftext|> (id 0), but a ChatML turn ends with <|im_end|> (id 2).
+# Without adding id 2 the model never stops at the end of its turn and keeps
+# generating the next role header (you see a bare literal "user") and then loops.
+im_end = tok.convert_tokens_to_ids("<|im_end|>")
+
 out = model.generate(
     ids,
     max_new_tokens=128,
     do_sample=False,
     use_cache=False,                     # see note below
+    eos_token_id=[tok.eos_token_id, im_end],
+    pad_token_id=tok.eos_token_id,
     attention_mask=torch.ones_like(ids),
 )
 print(tok.decode(out[0][ids.shape[1]:], skip_special_tokens=True))
 ```
+
+> **Set `eos_token_id=[0, 2]`.** The chat template ends a turn with `<|im_end|>` (id `2`), but the
+> tokenizer's `eos_token` is `<|endoftext|>` (id `0`). If you only use the default EOS, generation
+> does not stop at the end of the assistant turn: the model emits the next `<|im_start|>user` header
+> (visible as a bare `user` in the decoded text) and degenerates into repetition. This is also set in
+> `generation_config.json`, so plain `model.generate(...)` works — but pass it explicitly if you
+> override the generation config.
 
 > **`use_cache=False` is required.** With `transformers>=4.5x` the cached-decoding path of
 > Ouro's custom `modeling_ouro.py` raises
@@ -117,8 +131,9 @@ print(tok.decode(out[0][ids.shape[1]:], skip_special_tokens=True))
 ## Limitations
 
 - 1.4B parameters: factual accuracy is limited; expect hallucinations (e.g. wrong capitals).
-- Repetition/degeneration can appear on open-ended prompts under greedy decoding; use a
-  repetition penalty or sampling for free-form generation.
+- Under plain greedy decoding with the default EOS, output can run past the end of the turn and
+  loop; pass `eos_token_id=[0, 2]` (see Usage) — a repetition penalty or sampling makes it worse
+  for this model.
 - Trained on ~15K Persian SFT samples for 2 epochs — not an encyclopedic model.
 - Below Qwen3-4B-class models on every benchmark.
 - Benchmarks are log-probability-free generation accuracy at n=500, single seed.
